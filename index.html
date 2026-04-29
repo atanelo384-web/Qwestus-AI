@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>Qesty AI — умный чат</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- Marked.js для Markdown -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, updateDoc, arrayUnion, arrayRemove, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        // Firebase Config
+        const firebaseConfig = {
+            apiKey: "AIzaSyDbeswCHq8Lg7Dnz9oYSgZeIqQ8azcEC-s",
+            authDomain: "qesty-ai.firebaseapp.com",
+            projectId: "qesty-ai",
+            storageBucket: "qesty-ai.firebasestorage.app",
+            messagingSenderId: "125275289686",
+            appId: "1:125275289686:web:5410de4bc789775b8063f7",
+            measurementId: "G-68ZKJQ3D0H"
+        };
+
+        // OpenRouter API Key
+        const OPENROUTER_API_KEY = "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";
+
+        // Инициализация
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const provider = new GoogleAuthProvider();
+        const db = getFirestore(app);
+
+        // DOM элементы
+        const loginScreen = document.getElementById('loginScreen');
+        const appContainer = document.getElementById('appContainer');
+        const userAvatar = document.getElementById('userAvatar');
+        const userNameSpan = document.getElementById('userName');
+        const logoutBtn = document.getElementById('logoutBtn');
+        const historyList = document.getElementById('historyList');
+        const newChatBtn = document.getElementById('newChatBtn');
+        const chatArea = document.getElementById('chatArea');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const typingIndicator = document.getElementById('typingIndicator');
+        const themeToggle = document.getElementById('themeToggle');
+        const regenerateBtn = document.getElementById('regenerateBtn');
+
+        let currentUserId = null;
+        let currentChatId = null;
+        let currentMessages = [];
+        let isDarkTheme = localStorage.getItem('theme') === 'dark';
+
+        // === ТЕМА ===
+        function applyTheme() {
+            if (isDarkTheme) {
+                document.body.classList.add('dark-theme');
+                themeToggle.innerHTML = '<i class="fas fa-sun"></i>';
+            } else {
+                document.body.classList.remove('dark-theme');
+                themeToggle.innerHTML = '<i class="fas fa-moon"></i>';
+            }
+        }
+        
+        themeToggle.onclick = () => {
+            isDarkTheme = !isDarkTheme;
+            localStorage.setItem('theme', isDarkTheme ? 'dark' : 'light');
+            applyTheme();
+        };
+        applyTheme();
+
+        // === АВТОРИЗАЦИЯ ===
+        window.handleGoogleLogin = async () => {
+            try {
+                const result = await signInWithPopup(auth, provider);
+                await initUserData(result.user.uid);
+            } catch (error) {
+                alert("Ошибка входа: " + error.message);
+            }
+        };
+
+        async function initUserData(uid) {
+            const userRef = doc(db, "users", uid);
+            const userSnap = await getDoc(userRef);
+            if (!userSnap.exists()) {
+                await setDoc(userRef, { 
+                    chats: [],
+                    email: auth.currentUser?.email,
+                    createdAt: new Date().toISOString()
+                });
+                console.log("✅ Создан новый пользователь");
+            }
+        }
+
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                currentUserId = user.uid;
+                loginScreen.classList.add('hidden');
+                appContainer.classList.remove('hidden');
+                userAvatar.src = user.photoURL || `https://ui-avatars.com/api/?background=4f46e5&color=fff&name=${user.displayName?.[0] || 'U'}`;
+                userNameSpan.textContent = user.displayName || user.email;
+                await initUserData(currentUserId);
+                listenHistory();
+                loadLastChat();
+            } else {
+                loginScreen.classList.remove('hidden');
+                appContainer.classList.add('hidden');
+                currentUserId = null;
+            }
+        });
+
+        logoutBtn.onclick = () => signOut(auth);
+
+        // === ИСТОРИЯ ===
+        function listenHistory() {
+            const userRef = doc(db, "users", currentUserId);
+            onSnapshot(userRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    renderHistory(docSnap.data().chats || []);
+                }
+            });
+        }
+
+        function renderHistory(chats) {
+            if (!historyList) return;
+            historyList.innerHTML = '';
+            if (chats.length === 0) {
+                historyList.innerHTML = '<div class="empty-history"><i class="far fa-comment-dots"></i><p>Нет диалогов</p></div>';
+                return;
+            }
+            chats.slice().reverse().forEach(chat => {
+                const chatDiv = document.createElement('div');
+                chatDiv.className = `history-item ${currentChatId === chat.id ? 'active' : ''}`;
+                chatDiv.innerHTML = `
+                    <i class="far fa-comment"></i>
+                    <span>${escapeHtml(chat.title || 'Новый чат')}</span>
+                    <i class="fas fa-trash-alt delete-chat" data-id="${chat.id}"></i>
+                `;
+                chatDiv.querySelector('.delete-chat')?.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deleteChat(chat.id);
+                });
+                chatDiv.onclick = () => loadChat(chat.id);
+                historyList.appendChild(chatDiv);
+            });
+        }
+
+        async function deleteChat(chatId) {
+            if (!confirm('Удалить этот диалог?')) return;
+            const userRef = doc(db, "users", currentUserId);
+            const userSnap = await getDoc(userRef);
+            if (userSnap.exists()) {
+                const chats = userSnap.data().chats || [];
+                const updatedChats = chats.filter(c => c.id !== chatId);
+                await updateDoc(userRef, { chats: updatedChats });
+                if (currentChatId === chatId) {
+                    currentChatId = null;
+                    currentMessages = [];
+                    renderMessages();
+                    if (updatedChats.length > 0) {
+                        loadChat(updatedChats[updatedChats.length - 1].id);
+                    } else {
+                        await createNewChat();
+                    }
+                }
+            }
+        }
+
+        async function createNewChat() {
+            if (!currentUserId) return;
+            const newId = Date.now().toString();
+            const newChat = {
+                id: newId,
+                title: 'Новый диалог',
+                createdAt: new Date().toISOString(),
+                messages: []
+            };
+            const userRef = doc(db, "users", currentUserId);
+            const userSnap = await getDoc(userRef);
+            const chats = userSnap.exists() ? (userSnap.data().chats || []) : [];
+            await updateDoc(userRef, { chats: [...chats, newChat] });
+            loadChat(newId);
+        }
+
+        async function loadChat(chatId) {
+            currentChatId = chatId;
+            const userSnap = await getDoc(doc(db, "users", currentUserId));
+            if (userSnap.exists()) {
+                const chat = userSnap.data().chats?.find(c => c.id === chatId);
+                if (chat) {
+                    currentMessages = chat.messages || [];
+                    renderMessages();
+                    renderHistory(userSnap.data().chats || []);
+                }
+            }
+            messageInput.disabled = false;
+            sendBtn.disabled = false;
+            messageInput.focus();
+        }
+
+        async function loadLastChat() {
+            const userSnap = await getDoc(doc(db, "users", currentUserId));
+            if (userSnap.exists()) {
+                const chats = userSnap.data().chats || [];
+                if (chats.length > 0) {
+                    loadChat(chats[chats.length - 1].id);
+                } else {
+                    await createNewChat();
+                }
+            }
+        }
+
+        newChatBtn.onclick = () => createNewChat();
+
+        // === ОТРИСОВКА ===
+        function renderMessages() {
+            if (!chatArea) return;
+            chatArea.innerHTML = '';
+            if (!currentMessages.length) {
+                chatArea.innerHTML = '<div class="empty-chat"><i class="fas fa-robot"></i><p>Напишите Qesty что-нибудь...</p></div>';
+                return;
+            }
+            currentMessages.forEach((msg, idx) => {
+                const msgDiv = document.createElement('div');
+                msgDiv.className = `message ${msg.role === 'user' ? 'user' : 'ai'}`;
+                const formattedText = msg.role === 'ai' ? marked.parse(msg.text) : escapeHtml(msg.text);
+                msgDiv.innerHTML = `
+                    <div class="message-bubble">
+                        <strong>${msg.role === 'user' ? 'Вы' : 'Qesty AI'}</strong>
+                        <div class="message-content">${formattedText}</div>
+                        ${msg.role === 'ai' ? `<div class="message-actions"><i class="fas fa-copy copy-msg" data-idx="${idx}"></i></div>` : ''}
+                        ${msg.role === 'user' ? `<div class="message-actions"><i class="fas fa-edit edit-msg" data-idx="${idx}"></i></div>` : ''}
+                    </div>
+                `;
+                
+                if (msg.role === 'ai') {
+                    msgDiv.querySelector('.copy-msg')?.addEventListener('click', () => {
+                        navigator.clipboard.writeText(msg.text);
+                        alert('Скопировано!');
+                    });
+                }
+                
+                if (msg.role === 'user') {
+                    msgDiv.querySelector('.edit-msg')?.addEventListener('click', async () => {
+                        const newText = prompt('Редактировать сообщение:', msg.text);
+                        if (newText && newText.trim()) {
+                            currentMessages[idx].text = newText.trim();
+                            await saveMessagesToFirestore();
+                            renderMessages();
+                            // Перегенерировать ответ
+                            await regenerateResponse(idx);
+                        }
+                    });
+                }
+                
+                chatArea.appendChild(msgDiv);
+            });
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+        async function regenerateResponse(userMsgIndex) {
+            if (userMsgIndex + 1 < currentMessages.length && currentMessages[userMsgIndex + 1].role === 'ai') {
+                currentMessages.splice(userMsgIndex + 1, 1);
+            }
+            await saveMessagesToFirestore();
+            renderMessages();
+            
+            // Отправить запрос заново
+            const lastUserMsg = currentMessages[userMsgIndex];
+            if (lastUserMsg && lastUserMsg.role === 'user') {
+                typingIndicator.classList.remove('hidden');
+                try {
+                    const aiReply = await callOpenRouter(currentMessages.slice(0, userMsgIndex + 1));
+                    const aiMessage = { role: 'ai', text: aiReply, timestamp: Date.now() };
+                    currentMessages.splice(userMsgIndex + 1, 0, aiMessage);
+                    await saveMessagesToFirestore();
+                    renderMessages();
+                } catch (err) {
+                    console.error(err);
+                    const errorMsg = { role: 'ai', text: '❌ Ошибка: ' + err.message, timestamp: Date.now() };
+                    currentMessages.splice(userMsgIndex + 1, 0, errorMsg);
+                    await saveMessagesToFirestore();
+                    renderMessages();
+                } finally {
+                    typingIndicator.classList.add('hidden');
+                }
+            }
+        }
+
+        regenerateBtn.onclick = () => {
+            if (currentMessages.length >= 2) {
+                const lastUserIndex = currentMessages.length - 2;
+                if (currentMessages[lastUserIndex]?.role === 'user') {
+                    regenerateResponse(lastUserIndex);
+                }
+            }
+        };
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // === ОТПРАВКА ===
+        async function sendMessage() {
+            const text = messageInput.value.trim();
+            if (!text || !currentUserId || !currentChatId) return;
+
+            const userMessage = { role: 'user', text, timestamp: Date.now() };
+            currentMessages.push(userMessage);
+            await saveMessagesToFirestore();
+            renderMessages();
+
+            messageInput.value = '';
+            messageInput.disabled = true;
+            sendBtn.disabled = true;
+            typingIndicator.classList.remove('hidden');
+
+            try {
+                const aiReply = await callOpenRouter(currentMessages);
+                const aiMessage = { role: 'ai', text: aiReply, timestamp: Date.now() };
+                currentMessages.push(aiMessage);
+                await saveMessagesToFirestore();
+                renderMessages();
+
+                if (currentMessages.length === 2) {
+                    const title = text.length > 30 ? text.slice(0,30)+'…' : text;
+                    await updateChatTitle(currentChatId, title);
+                }
+            } catch (err) {
+                console.error(err);
+                const errorMsg = { role: 'ai', text: '❌ Ошибка: ' + err.message, timestamp: Date.now() };
+                currentMessages.push(errorMsg);
+                await saveMessagesToFirestore();
+                renderMessages();
+            } finally {
+                messageInput.disabled = false;
+                sendBtn.disabled = false;
+                typingIndicator.classList.add('hidden');
+                messageInput.focus();
+            }
+        }
+
+        async function callOpenRouter(messages) {
+            const apiMessages = messages.slice(-20).map(m => ({
+                role: m.role === 'user' ? 'user' : 'assistant',
+                content: m.text
+            }));
+
+            const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${OPENROUTER_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: "meta-llama/llama-3.3-70b-instruct:free",
+                    messages: apiMessages,
+                    temperature: 0.7,
+                    max_tokens: 2048
+                })
+            });
+            
+            const data = await response.json();
+            if (data.error) throw new Error(data.error.message);
+            return data.choices[0].message.content;
+        }
+
+        async function saveMessagesToFirestore() {
+            const userRef = doc(db, "users", currentUserId);
+            const userSnap = await getDoc(userRef);
+            if (userSnap.exists()) {
+                const chats = userSnap.data().chats || [];
+                const updatedChats = chats.map(chat => {
+                    if (chat.id === currentChatId) {
+                        return { ...chat, messages: currentMessages };
+                    }
+                    return chat;
+                });
+                await updateDoc(userRef, { chats: updatedChats });
+            }
+        }
+
+        async function updateChatTitle(chatId, newTitle) {
+            const userRef = doc(db, "users", currentUserId);
+            const userSnap = await getDoc(userRef);
+            if (userSnap.exists()) {
+                const chats = userSnap.data().chats || [];
+                const updatedChats = chats.map(chat => {
+                    if (chat.id === chatId) {
+                        return { ...chat, title: newTitle };
+                    }
+                    return chat;
+                });
+                await updateDoc(userRef, { chats: updatedChats });
+            }
+        }
+
+        sendBtn.onclick = sendMessage;
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+    </script>
+
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #f7f9fc;
+            height: 100vh;
+            overflow: hidden;
+            transition: background 0.3s, color 0.3s;
+        }
+        
+        /* Тёмная тема */
+        body.dark-theme { background: #0f172a; color: #e2e8f0; }
+        body.dark-theme .login-card { background: #1e293b; color: #e2e8f0; }
+        body.dark-theme .sidebar { background: #0f172a; border-right-color: #1e293b; }
+        body.dark-theme .main-chat { background: #0f172a; }
+        body.dark-theme .message-bubble { background: #1e293b; color: #e2e8f0; }
+        body.dark-theme .message.ai .message-bubble { border-color: #334155; }
+        body.dark-theme .input-wrapper { background: #1e293b; border-color: #334155; }
+        body.dark-theme textarea { color: #e2e8f0; }
+        body.dark-theme .history-item:hover { background: #1e293b; }
+        body.dark-theme .history-item.active { background: #334155; }
+        
+        .login-card {
+            background: white;
+            border-radius: 2rem;
+            padding: 2.5rem;
+            text-align: center;
+            box-shadow: 0 15px 40px rgba(0,0,0,0.05);
+            max-width: 400px;
+            width: 90%;
+        }
+        .login-card i { font-size: 3.5rem; color: #6366f1; margin-bottom: 1rem; }
+        .login-card h1 { font-weight: 500; font-size: 2rem; margin-bottom: 0.5rem; }
+        .google-btn {
+            background: white;
+            border: 1px solid #e2e8f0;
+            padding: 0.8rem 1.8rem;
+            border-radius: 3rem;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .google-btn:hover { background: #f8fafc; transform: scale(0.98); }
+        .app-layout { display: flex; height: 100vh; }
+        
+        .sidebar {
+            width: 280px;
+            background: #fefefe;
+            border-right: 1px solid #edf2f7;
+            display: flex;
+            flex-direction: column;
+            padding: 1.5rem 1rem;
+        }
+        .sidebar-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 1.5rem;
+            border-bottom: 1px solid #eef2f6;
+            margin-bottom: 1.5rem;
+        }
+        .logo-area h2 {
+            font-weight: 500;
+            font-size: 1.5rem;
+            background: linear-gradient(135deg, #4f46e5, #8b5cf6);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        .new-chat-btn, .theme-toggle-btn {
+            background: #4f46e5;
+            border: none;
+            color: white;
+            width: 38px;
+            height: 38px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .new-chat-btn:hover, .theme-toggle-btn:hover { background: #6366f1; transform: rotate(90deg); }
+        .history-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; }
+        .history-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 0.7rem 1rem;
+            border-radius: 14px;
+            cursor: pointer;
+            position: relative;
+        }
+        .history-item .delete-chat {
+            margin-left: auto;
+            opacity: 0;
+            transition: 0.2s;
+            color: #ef4444;
+        }
+        .history-item:hover .delete-chat { opacity: 1; }
+        .history-item.active { background: #eef2ff; color: #4f46e5; font-weight: 500; }
+        
+        .chat-header {
+            padding: 1rem 2rem;
+            border-bottom: 1px solid #f0f2f5;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .chat-actions button {
+            background: none;
+            border: none;
+            font-size: 1.2rem;
+            cursor: pointer;
+            padding: 0.5rem;
+            border-radius: 10px;
+            color: #94a3b8;
+        }
+        .chat-actions button:hover { background: #f1f5f9; color: #4f46e5; }
+        
+        .chat-messages { flex: 1; overflow-y: auto; padding: 2rem; scroll-behavior: smooth; }
+        .message { margin-bottom: 1.2rem; display: flex; }
+        .message.user { justify-content: flex-end; }
+        .message-bubble {
+            max-width: 70%;
+            padding: 0.8rem 1.2rem;
+            border-radius: 1.8rem;
+            background: #f1f5f9;
+            position: relative;
+        }
+        .message.user .message-bubble { background: #4f46e5; color: white; border-bottom-right-radius: 0.3rem; }
+        .message.ai .message-bubble { background: #f8fafc; border: 1px solid #eef2ff; border-bottom-left-radius: 0.3rem; }
+        .message-actions {
+            position: absolute;
+            right: 8px;
+            bottom: -20px;
+            display: flex;
+            gap: 8px;
+            opacity: 0;
+            transition: 0.2s;
+        }
+        .message-bubble:hover .message-actions { opacity: 1; }
+        .message-actions i {
+            font-size: 0.7rem;
+            cursor: pointer;
+            color: #94a3b8;
+            background: white;
+            padding: 4px;
+            border-radius: 50%;
+        }
+        .message-actions i:hover { color: #4f46e5; }
+        .message-content { line-height: 1.45; }
+        .message-content p { margin: 4px 0; }
+        
+        .input-area { padding: 1rem 2rem 1.8rem; border-top: 1px solid #f0f2f5; }
+        .input-wrapper {
+            display: flex;
+            gap: 12px;
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 3rem;
+            padding: 0.4rem 0.4rem 0.4rem 1.5rem;
+            transition: all 0.2s;
+        }
+        .input-wrapper:hover { border-color: #a5b4fc; box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1); }
+        textarea {
+            flex: 1;
+            border: none;
+            resize: none;
+            font-family: inherit;
+            font-size: 0.95rem;
+            padding: 0.7rem 0;
+            background: transparent;
+            outline: none;
+        }
+        .send-btn {
+            background: #4f46e5;
+            border: none;
+            color: white;
+            width: 42px;
+            height: 42px;
+            border-radius: 40px;
+            cursor: pointer;
+        }
+        .send-btn:hover { background: #6366f1; transform: scale(0.96); }
+        .typing-indicator { font-size: 0.75rem; color: #94a3b8; padding: 0.5rem 1.5rem; }
+        .hidden { display: none; }
+        
+        @media (max-width: 640px) {
+            .sidebar { width: 70px; padding: 1rem 0.5rem; }
+            .logo-area p, .history-item span { display: none; }
+            .history-item .delete-chat { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <div id="loginScreen" style="display: flex; justify-content: center; align-items: center; height: 100vh; background: inherit;">
+        <div class="login-card">
+            <i class="fas fa-brain"></i>
+            <h1>Qesty AI</h1>
+            <p>войдите через Google, чтобы начать</p>
+            <button class="google-btn" onclick="handleGoogleLogin()">
+                <i class="fab fa-google"></i> Войти с Google
+            </button>
+        </div>
+    </div>
+
+    <div id="appContainer" class="app-layout hidden">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-area">
+                    <h2>Qesty AI</h2>
+                    <p>smart chat</p>
+                </div>
+                <button class="new-chat-btn" id="newChatBtn"><i class="fas fa-plus"></i></button>
+            </div>
+            <div class="history-title">ИСТОРИЯ</div>
+            <div class="history-list" id="historyList"></div>
+            <div class="user-info" style="margin-top: auto; display: flex; align-items: center; gap: 12px; padding-top: 1rem;">
+                <img id="userAvatar" width="36" height="36" style="border-radius: 50%;">
+                <span id="userName" style="flex:1; font-size:0.85rem;"></span>
+                <button class="theme-toggle-btn" id="themeToggle"><i class="fas fa-moon"></i></button>
+                <button class="logout-btn" id="logoutBtn" style="background:none; border:none; color:#cbd5e1; cursor:pointer;"><i class="fas fa-sign-out-alt"></i></button>
+            </div>
+        </aside>
+
+        <main class="main-chat">
+            <div class="chat-header">
+                <h3><i class="far fa-comment-dots"></i> Диалог с Qesty</h3>
+                <div class="chat-actions">
+                    <button id="regenerateBtn"><i class="fas fa-rotate-right"></i></button>
+                </div>
+            </div>
+            <div class="chat-messages" id="chatArea"></div>
+            <div class="input-area">
+                <div class="input-wrapper">
+                    <textarea id="messageInput" rows="1" placeholder="Напишите что-нибудь..." disabled></textarea>
+                    <button class="send-btn" id="sendBtn" disabled><i class="fas fa-paper-plane"></i></button>
+                </div>
+                <div id="typingIndicator" class="typing-indicator hidden">Qesty печатает...</div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>
